@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { load, save, MAX_NOTE, MATCH_STATUS } = require('./store');
 const { ApiError, pickText } = require('./errors');
-const { nameMaps } = require('./standings');
+const { nameMaps, computeTable } = require('./standings');
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -72,14 +72,19 @@ function validatePayload(input, data, selfId) {
   let homeGoals = null;
   let awayGoals = null;
   if (status === '已赛') {
-    homeGoals = Number(source.homeGoals);
-    awayGoals = Number(source.awayGoals);
-    if (!Number.isInteger(homeGoals) || homeGoals < 0 || homeGoals > 99) {
-      throw new ApiError(400, 'GOALS_INVALID', '主队进球数要填 0 到 99 之间的整数', 'homeGoals');
-    }
-    if (!Number.isInteger(awayGoals) || awayGoals < 0 || awayGoals > 99) {
-      throw new ApiError(400, 'GOALS_INVALID', '客队进球数要填 0 到 99 之间的整数', 'awayGoals');
-    }
+    // 已赛必须显式给出进球数；收回结果后再改回已赛时留空，不能被当成 0:0，要提示重新登记
+    const parseGoals = (raw, field, side) => {
+      if (raw === null || raw === undefined || (typeof raw === 'string' && raw.trim() === '')) {
+        throw new ApiError(400, 'GOALS_REQUIRED', `状态为已赛时要填写${side}进球数；如果是收回后重新改回已赛，需要重新登记比分`, field);
+      }
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 0 || n > 99) {
+        throw new ApiError(400, 'GOALS_INVALID', `${side}进球数要填 0 到 99 之间的整数`, field);
+      }
+      return n;
+    };
+    homeGoals = parseGoals(source.homeGoals, 'homeGoals', '主队');
+    awayGoals = parseGoals(source.awayGoals, 'awayGoals', '客队');
   } else if (source.homeGoals !== undefined && source.homeGoals !== null && source.homeGoals !== '') {
     throw new ApiError(400, 'GOALS_NOT_ALLOWED', '还没打完的场次不能填比分，先把状态改成已赛', 'homeGoals');
   }
@@ -227,6 +232,57 @@ function recordResult(id, payload) {
   });
 }
 
+// 已赛改回未赛前的后果说明：比分是哪两个数字、涉及两队、积分与净胜球各变多少、名次从第几到第几
+function revokePreview(id) {
+  const data = load();
+  const match = data.matches.find((item) => item.id === id);
+  if (!match) throw new ApiError(404, 'MATCH_NOT_FOUND', '这场赛程不存在或已被删除', '');
+  if (match.status !== '已赛') {
+    throw new ApiError(400, 'MATCH_NOT_PLAYED', '这场本来就还没打，没有已登记的结果需要收回', '');
+  }
+
+  const { teams, venues } = nameMaps();
+  const before = computeTable({});
+  const after = computeTable({ excludeMatchId: id });
+
+  const summarize = (table, teamId) => {
+    const row = table.find((item) => item.teamId === teamId);
+    if (!row) return null;
+    return {
+      teamId: row.teamId,
+      name: row.name,
+      rank: row.rank,
+      played: row.played,
+      goalsFor: row.goalsFor,
+      goalsAgainst: row.goalsAgainst,
+      goalDiff: row.goalDiff,
+      points: row.points,
+    };
+  };
+
+  const pair = (teamId) => {
+    const b = summarize(before.table, teamId);
+    const a = summarize(after.table, teamId);
+    return {
+      before: b,
+      after: a,
+      pointsDelta: a.points - b.points,
+      goalDiffDelta: a.goalDiff - b.goalDiff,
+      goalsForDelta: a.goalsFor - b.goalsFor,
+      goalsAgainstDelta: a.goalsAgainst - b.goalsAgainst,
+      playedDelta: a.played - b.played,
+      rankDelta: a.rank - b.rank,
+    };
+  };
+
+  return {
+    match: decorate(match, teams, venues),
+    revokedScore: { homeGoals: match.homeGoals, awayGoals: match.awayGoals },
+    home: pair(match.homeTeamId),
+    away: pair(match.awayTeamId),
+  };
+}
+
 function deleteMatch(id) {
   const data = load();
   const index = data.matches.findIndex((item) => item.id === id);
@@ -236,4 +292,4 @@ function deleteMatch(id) {
   return { id: removed.id, round: removed.round };
 }
 
-module.exports = { listMatches, createMatch, updateMatch, recordResult, deleteMatch, resolveVenueId };
+module.exports = { listMatches, createMatch, updateMatch, recordResult, revokePreview, deleteMatch, resolveVenueId };

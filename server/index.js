@@ -108,6 +108,15 @@ app.post('/api/matches/:id/result', (req, res) => {
   }
 });
 
+// 收回已赛结果前的后果预览：比分、涉及两队、积分净胜球与名次的前后变化
+app.get('/api/matches/:id/revoke-preview', (req, res) => {
+  try {
+    res.json(api.revokePreview(req.params.id));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
 app.delete('/api/matches/:id', (req, res) => {
   try {
     res.json(api.deleteMatch(req.params.id));

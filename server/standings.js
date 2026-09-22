@@ -74,8 +74,9 @@ function computeTable(options) {
   const rows = new Map();
   data.teams.forEach((team) => rows.set(team.id, emptyRow(team)));
 
+  // excludeMatchId：收回某场结果前先算一版“没有这场”的积分表，用来对比名次与数据变化
   data.matches
-    .filter((match) => match.status === '已赛')
+    .filter((match) => match.status === '已赛' && match.id !== input.excludeMatchId)
     .forEach((match) => applyMatch(rows, match));
 
   const list = Array.from(rows.values()).sort(compareRows);

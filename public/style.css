@@ -199,6 +199,30 @@ table.grid.standings td:nth-child(n+3) { font-family: Consolas, "Courier New", m
 .weekday-pick { display: flex; flex-wrap: wrap; gap: 8px; }
 .weekday-pick label { display: flex; align-items: center; gap: 4px; font-size: 12.5px; color: var(--ink); }
 
+/* 状态切换的内联提醒：已赛改未赛是红色，未赛改已赛是琥珀色 */
+.status-warn { display: none; border-radius: 10px; padding: 9px 11px; font-size: 12.5px; line-height: 1.5; }
+.status-warn.show { display: block; }
+.status-warn.bad { background: var(--danger-soft); color: var(--danger); border: 1px solid #f2c5c3; }
+.status-warn.wait { background: var(--amber-soft); color: var(--amber); border: 1px solid #eed9b4; }
+
+/* 收回已赛结果前的后果确认面板 */
+.revoke-card {
+  border: 1px solid #f2c5c3; border-radius: 12px; padding: 13px 14px;
+  background: var(--danger-soft); display: flex; flex-direction: column; gap: 9px;
+}
+.revoke-card h3 { margin: 0; font-size: 14px; color: var(--danger); }
+.revoke-score { margin: 0; font-size: 14px; }
+.revoke-score b { font-family: Consolas, "Courier New", monospace; font-size: 16px; color: var(--danger); }
+.revoke-grid { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; }
+.revoke-grid th, .revoke-grid td { padding: 7px 9px; border-bottom: 1px solid var(--line); font-size: 12.5px; text-align: left; }
+.revoke-grid th { background: #fafbfd; color: var(--ink-soft); font-weight: 600; }
+.revoke-grid tr:last-child td { border-bottom: none; }
+.revoke-grid td.num, .revoke-grid th.num { font-family: Consolas, "Courier New", monospace; }
+.revoke-grid small { color: var(--danger); margin-left: 4px; }
+.revoke-note { margin: 0; font-size: 12.5px; color: var(--ink); }
+.revoke-actions { display: flex; gap: 8px; }
+button.primary.danger { border-color: var(--danger); background: var(--danger); }
+
 .toasts { position: fixed; top: 16px; right: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 30; }
 .toast {
   min-width: 220px; max-width: 340px; padding: 10px 13px; border-radius: 10px;

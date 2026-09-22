@@ -280,7 +280,15 @@ function openVenueDrawer(venue) {
 }
 
 function openMatchDrawer(match) {
-  state.drawer = { mode: match ? 'edit' : 'create', entity: 'match', id: match ? match.id : '', title: match ? `编辑赛程：第 ${match.round} 轮` : '新增赛程' };
+  state.drawer = {
+    mode: match ? 'edit' : 'create',
+    entity: 'match',
+    id: match ? match.id : '',
+    title: match ? `编辑赛程：第 ${match.round} 轮` : '新增赛程',
+    origStatus: match ? match.status : '',
+    revokePending: null,
+    revokePreview: null,
+  };
   const teamOptions = state.teams.map((item) => ({ value: item.id, label: `${item.name}（${item.shortName}）` }));
   const venueOptions = [{ value: '', label: '留空表示用主队主场' }].concat(state.venues.map((item) => ({ value: item.id, label: item.name })));
   const statusOptions = ['待赛', '已赛', '延期', '取消'].map((value) => ({ value, label: value }));
@@ -300,8 +308,123 @@ function openMatchDrawer(match) {
       <label class="field"><span>主队进球</span><input data-name="homeGoals" maxlength="2" value="${match && match.homeGoals !== null ? match.homeGoals : ''}" placeholder="留空表示未赛"></label>
       <label class="field"><span>客队进球</span><input data-name="awayGoals" maxlength="2" value="${match && match.awayGoals !== null ? match.awayGoals : ''}" placeholder="留空表示未赛"></label>
     </div>
+    <div class="status-warn" id="status-warn"></div>
     <label class="field"><span>备注</span><input data-name="note" maxlength="200" value="${escapeHtml(match ? match.note : '')}" placeholder="需要留意的地方"></label>`;
   showDrawer();
+  if (match) {
+    const statusNode = el('drawer-form').querySelector('[data-name="status"]');
+    statusNode.addEventListener('change', renderStatusWarn);
+    renderStatusWarn();
+  }
+}
+
+/* 已赛改回未赛：状态一变动先给出静态提醒，真正保存前再弹一次带具体数字的后果确认 */
+const signedNum = (n) => (n > 0 ? `+${n}` : String(n));
+
+function renderStatusWarn() {
+  const node = el('status-warn');
+  if (!node) return;
+  const origStatus = state.drawer.origStatus;
+  const select = el('drawer-form').querySelector('[data-name="status"]');
+  if (!origStatus || !select) { node.className = 'status-warn'; node.innerHTML = ''; return; }
+  const next = select.value;
+  if (origStatus === '已赛' && next !== '已赛') {
+    node.className = 'status-warn bad show';
+    node.textContent = '这场已经登记比分。这样保存会把比分收回、退出积分榜累计；保存前会先列出涉及球队与积分、净胜球、名次的具体变化让你确认，取消则一点不改。';
+  } else if (origStatus !== '已赛' && next === '已赛') {
+    node.className = 'status-warn wait show';
+    node.textContent = '改回「已赛」不会自动带回原来的比分，需要在下方重新填写两队进球数，或保存后用「登记比分」补登。';
+  } else {
+    node.className = 'status-warn';
+    node.innerHTML = '';
+  }
+}
+
+function revokeSideHtml(side) {
+  const b = side.before;
+  const a = side.after;
+  const move = side.rankDelta === 0 ? '名次不变'
+    : (side.rankDelta > 0 ? `下降 ${side.rankDelta} 位` : `上升 ${-side.rankDelta} 位`);
+  return `<tr>
+      <td>${escapeHtml(b.name)}</td>
+      <td class="num">${b.points} → ${a.points}<small>（${signedNum(side.pointsDelta)}）</small></td>
+      <td class="num">${signedNum(b.goalDiff)} → ${signedNum(a.goalDiff)}<small>（${signedNum(side.goalDiffDelta)}）</small></td>
+      <td class="num">第 ${b.rank} → 第 ${a.rank}<small>${escapeHtml(move)}</small></td>
+    </tr>`;
+}
+
+function revokePanelHtml(preview) {
+  const m = preview.match;
+  const score = preview.revokedScore;
+  return `<div class="revoke-card" id="revoke-panel">
+    <h3>这场结果将被收回，请先看清后果</h3>
+    <p class="revoke-score">第 ${m.round} 轮　${escapeHtml(m.homeName)} <b>${score.homeGoals} : ${score.awayGoals}</b> ${escapeHtml(m.awayName)}</p>
+    <p class="hint">确认保存后，上面这两个进球数会被清空、退出累计，两队各少算一场，积分、净胜球与名次变成：</p>
+    <table class="revoke-grid">
+      <thead><tr><th>球队</th><th>积分</th><th>净胜球</th><th>名次</th></tr></thead>
+      <tbody>${revokeSideHtml(preview.home)}${revokeSideHtml(preview.away)}</tbody>
+    </table>
+    <p class="revoke-note">收回后再改回「已赛」，被收回的比分 <b>${score.homeGoals} : ${score.awayGoals}</b> 不会自动恢复，需要重新登记。</p>
+    <div class="revoke-actions">
+      <button type="button" class="primary danger" id="revoke-ok">确认收回并保存</button>
+      <button type="button" class="ghost" id="revoke-cancel">返回修改</button>
+    </div>
+  </div>`;
+}
+
+async function requestRevokeConfirm(id, payload) {
+  let preview;
+  try {
+    preview = await request(`/api/matches/${encodeURIComponent(id)}/revoke-preview`);
+  } catch (err) {
+    toast(err.message, 'bad');
+    return false;
+  }
+  const old = el('revoke-panel');
+  if (old) old.remove();
+  state.drawer.revokePending = payload;
+  state.drawer.revokePreview = preview;
+  const wrap = document.createElement('div');
+  wrap.innerHTML = revokePanelHtml(preview);
+  const panel = wrap.firstElementChild;
+  el('drawer-form').prepend(panel);
+  el('revoke-ok').addEventListener('click', () => { confirmRevoke(id); });
+  el('revoke-cancel').addEventListener('click', cancelRevoke);
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  return true;
+}
+
+function cancelRevoke() {
+  state.drawer.revokePending = null;
+  state.drawer.revokePreview = null;
+  const panel = el('revoke-panel');
+  if (panel) panel.remove();
+}
+
+async function confirmRevoke(id) {
+  const payload = state.drawer.revokePending;
+  const preview = state.drawer.revokePreview;
+  if (!payload || !preview) return;
+  const btn = el('revoke-ok');
+  btn.disabled = true;
+  btn.textContent = '保存中…';
+  // 改回未赛要把比分显式清空，否则会被“未赛场次不能填比分”的校验挡下
+  const body = { ...payload, round: Number(payload.round), homeGoals: null, awayGoals: null };
+  try {
+    await request(`/api/matches/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) });
+  } catch (err) {
+    toast(err.message, 'bad');
+    btn.disabled = false;
+    btn.textContent = '确认收回并保存';
+    return;
+  }
+  const score = preview.revokedScore;
+  state.drawer.revokePending = null;
+  state.drawer.revokePreview = null;
+  closeDrawer();
+  toast(`比分 ${score.homeGoals} : ${score.awayGoals} 已收回，积分榜与名次已重算`, 'ok');
+  await Promise.all([loadMatches(), loadSummary()]);
+  if (state.view === 'table') await loadStandings();
 }
 
 function openResultDrawer(match) {
@@ -373,6 +496,13 @@ async function submitDrawer() {
         toast('比分已登记，积分榜已重算', 'ok');
       } else {
         const body = { ...payload, round: Number(payload.round) };
+        // 已赛改回非已赛：先看清后果，确认之后才真正保存
+        if (mode === 'edit' && state.drawer.origStatus === '已赛' && payload.status !== '已赛') {
+          if (el('revoke-panel')) return; // 后果面板已经开着，等用户确认或返回，不重复弹
+          const confirmed = await requestRevokeConfirm(id, body);
+          if (!confirmed) return;
+          return; // 真正的保存由确认面板里的按钮触发
+        }
         if (mode === 'edit') await request(`/api/matches/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) });
         else await request('/api/matches', { method: 'POST', body: JSON.stringify(body) });
         toast(mode === 'edit' ? '赛程已保存' : '赛程已新增', 'ok');
