@@ -108,6 +108,24 @@ app.post('/api/matches/:id/result', (req, res) => {
   }
 });
 
+// 收回赛果前先看影响：涉及球队、积分净胜球与名次会怎么变
+app.post('/api/matches/:id/revoke-preview', (req, res) => {
+  try {
+    res.json(api.previewRevoke(req.params.id, req.body || {}));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+// 确认收回：比分清空并改回未赛状态，原比分不会恢复
+app.post('/api/matches/:id/revoke', (req, res) => {
+  try {
+    res.json(api.revokeMatch(req.params.id, req.body || {}));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
 app.delete('/api/matches/:id', (req, res) => {
   try {
     res.json(api.deleteMatch(req.params.id));

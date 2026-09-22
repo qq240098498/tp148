@@ -206,3 +206,44 @@ table.grid.standings td:nth-child(n+3) { font-family: Consolas, "Courier New", m
 }
 .toast.ok { background: var(--brand); }
 .toast.bad { background: var(--danger); }
+
+/* 已赛改回未赛：后果说明面板 */
+.revoke-banner {
+  padding: 9px 12px; border-radius: 10px;
+  background: var(--amber-soft); color: #8a5a05; font-size: 12.5px;
+  border: 1px solid #f0ddb8;
+}
+.revoke-panel {
+  margin-top: 2px; padding: 14px; border-radius: 12px;
+  background: var(--danger-soft); border: 1px solid #f3d2cf;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.revoke-panel[hidden] { display: none; }
+.revoke-panel .revoke-head { font-weight: 700; color: var(--danger); font-size: 14px; }
+.revoke-score { margin: 0; font-size: 13px; }
+.revoke-score b { font-size: 15px; }
+.revoke-impact { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.revoke-impact li {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px 10px; border-radius: 9px; background: #fff; border: 1px solid #f3dbd9;
+  font-size: 12.5px;
+}
+.revoke-impact li span { color: var(--ink-soft); }
+.revoke-others { margin: 0; font-size: 12px; color: var(--ink-soft); }
+.revoke-warn { margin: 0; font-size: 12.5px; color: #8f2e2a; }
+.revoke-actions { display: flex; gap: 8px; }
+.revoke-actions .danger {
+  padding: 8px 14px; border-radius: 9px; font-family: inherit; font-size: 13px; cursor: pointer;
+  border: 1px solid var(--danger); background: var(--danger); color: #fff;
+}
+.revoke-actions .ghost {
+  padding: 7px 12px; border-radius: 9px; font-family: inherit; font-size: 13px; cursor: pointer;
+  border: 1px solid var(--line); background: #fff; color: var(--ink);
+}
+.revoke-actions button:disabled { opacity: .6; cursor: default; }
+/* 后果说明展示期间不允许改对阵与比分输入，只能确认或返回 */
+.is-locked .field { opacity: .55; pointer-events: none; }
+.revoke-impact strong { display: flex; align-items: center; gap: 6px; }
+.revoke-impact em { font-style: normal; font-size: 11px; padding: 0 6px; border-radius: 999px; }
+.tag-old { background: var(--danger-soft); color: var(--danger); }
+.tag-new { background: var(--brand-soft); color: var(--brand); }

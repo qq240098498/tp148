@@ -171,6 +171,8 @@ function normalize(raw) {
       status,
       homeGoals: status === '已赛' && item.homeGoals !== null && item.homeGoals !== undefined ? Number(item.homeGoals) : null,
       awayGoals: status === '已赛' && item.awayGoals !== null && item.awayGoals !== undefined ? Number(item.awayGoals) : null,
+      // 赛果曾被收回的场次留个时间戳，用来提醒重新登记时原比分不会自己回来
+      resultRevokedAt: typeof item.resultRevokedAt === 'string' ? item.resultRevokedAt : null,
       note: typeof item.note === 'string' ? item.note : '',
       createdAt: typeof item.createdAt === 'string' ? item.createdAt : new Date().toISOString(),
       updatedAt: typeof item.updatedAt === 'string' ? item.updatedAt : new Date().toISOString(),

@@ -21,7 +21,7 @@ function emptyRow(team) {
 }
 
 // 把一轮比赛的结果累加到两支队身上
-function applyMatch(rows, match) {
+function applyMatch(rows, match, points) {
   const home = rows.get(match.homeTeamId);
   const away = rows.get(match.awayTeamId);
   if (!home || !away) return;
@@ -29,7 +29,6 @@ function applyMatch(rows, match) {
   const awayGoals = Number(match.awayGoals);
   if (!Number.isInteger(homeGoals) || !Number.isInteger(awayGoals)) return;
 
-  const points = load().meta.points;
   home.played += 1;
   away.played += 1;
   home.goalsFor += homeGoals;
@@ -68,23 +67,29 @@ function compareRows(a, b) {
   return a.name < b.name ? -1 : 1;
 }
 
-function computeTable(options) {
+// 对一份数据快照算整张积分表，不读盘；名次连带变化的对比也走这里
+function tableFromData(data, options) {
   const input = options && typeof options === 'object' ? options : {};
-  const data = load();
   const rows = new Map();
   data.teams.forEach((team) => rows.set(team.id, emptyRow(team)));
 
   data.matches
     .filter((match) => match.status === '已赛')
-    .forEach((match) => applyMatch(rows, match));
+    .forEach((match) => applyMatch(rows, match, data.meta.points));
 
   const list = Array.from(rows.values()).sort(compareRows);
   list.forEach((row, index) => { row.rank = index + 1; });
 
   const keyword = typeof input.keyword === 'string' ? input.keyword.trim().toLowerCase() : '';
-  const filtered = keyword
+  return keyword
     ? list.filter((row) => row.name.toLowerCase().includes(keyword) || row.city.toLowerCase().includes(keyword))
     : list;
+}
+
+function computeTable(options) {
+  const input = options && typeof options === 'object' ? options : {};
+  const data = load();
+  const list = tableFromData(data, input);
 
   return {
     season: data.meta.season,
@@ -94,7 +99,7 @@ function computeTable(options) {
     playedMatches: data.matches.filter((m) => m.status === '已赛').length,
     pendingMatches: data.matches.filter((m) => m.status === '待赛').length,
     postponedMatches: data.matches.filter((m) => m.status === '延期').length,
-    table: filtered,
+    table: list,
     computedAt: new Date().toISOString(),
   };
 }
@@ -107,4 +112,4 @@ function nameMaps() {
   return { teams, venues };
 }
 
-module.exports = { computeTable, compareRows, nameMaps };
+module.exports = { computeTable, compareRows, tableFromData, nameMaps };

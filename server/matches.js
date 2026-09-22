@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { load, save, MAX_NOTE, MATCH_STATUS } = require('./store');
 const { ApiError, pickText } = require('./errors');
-const { nameMaps } = require('./standings');
+const { nameMaps, tableFromData } = require('./standings');
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -209,8 +209,15 @@ function updateMatch(id, payload) {
     patch.awayGoals = null;
   }
   const merged = { ...found, ...patch };
+  const wasPlayed = found.status === '已赛';
   const checked = validatePayload(merged, data, found.id);
   Object.assign(found, checked);
+  // 已赛改回未赛：赛果被收回，盖个时间戳，页面据此提示原比分不会恢复；重新标成已赛时清除
+  if (wasPlayed && found.status !== '已赛') {
+    found.resultRevokedAt = new Date().toISOString();
+  } else if (found.status === '已赛') {
+    found.resultRevokedAt = null;
+  }
   found.updatedAt = new Date().toISOString();
   save(data);
   const { teams, venues } = nameMaps();
@@ -227,6 +234,132 @@ function recordResult(id, payload) {
   });
 }
 
+// 已赛改回未赛之前先定位：不是已赛或没比分就没有赛果可收回
+function findPlayedMatch(id) {
+  const data = load();
+  const found = data.matches.find((item) => item.id === id);
+  if (!found) throw new ApiError(404, 'MATCH_NOT_FOUND', '这场赛程不存在或已被删除', '');
+  if (found.status !== '已赛') {
+    throw new ApiError(409, 'MATCH_NOT_PLAYED', '这场还没打完，没有赛果可以收回', 'status');
+  }
+  if (!Number.isInteger(Number(found.homeGoals)) || !Number.isInteger(Number(found.awayGoals))) {
+    throw new ApiError(409, 'RESULT_MISSING', '这场已赛但没有登记比分，无赛果可收回', '');
+  }
+  return { data, found };
+}
+
+function readRevokeStatus(payload) {
+  const targetStatus = pickText(payload && payload.status) || '待赛';
+  if (targetStatus === '已赛' || !MATCH_STATUS.includes(targetStatus)) {
+    throw new ApiError(400, 'STATUS_INVALID', '收回赛果时状态只能选待赛、延期或者取消', 'status');
+  }
+  return targetStatus;
+}
+
+function teamBrief(team) {
+  return { teamId: team.teamId || team.id, name: team.name, shortName: team.shortName };
+}
+
+// 从前后两张积分表里抽出一支队的数字变化
+function diffRow(beforeMap, afterMap, teamId) {
+  const before = beforeMap.get(teamId);
+  const after = afterMap.get(teamId);
+  const metric = (name) => ({ before: before[name], after: after[name], delta: after[name] - before[name] });
+  return {
+    ...teamBrief(after),
+    played: metric('played'),
+    goalsFor: metric('goalsFor'),
+    goalsAgainst: metric('goalsAgainst'),
+    goalDiff: metric('goalDiff'),
+    points: metric('points'),
+    rank: metric('rank'),
+  };
+}
+
+// 预览收回这场赛果的影响：比分、涉及的两队、积分与净胜球、两队名次及其他被连带带动的名次
+function previewRevoke(id, payload) {
+  return buildRevokePreview(id, payload);
+}
+
+// 预览和真正收回共用：校验整张表单，再给出收回后要落盘的那场（比分强制为空）
+function buildRevokeCandidate(found, data, payload) {
+  const targetStatus = readRevokeStatus(payload);
+  const source = payload && typeof payload === 'object' ? { ...payload } : {};
+  const candidate = {
+    ...found,
+    ...source,
+    status: targetStatus,
+    homeGoals: null,
+    awayGoals: null,
+  };
+  return { targetStatus, candidate: validatePayload(candidate, data, found.id) };
+}
+
+// 算出收回后的快照表与前后差异，预览与真正收回共用同一份口径
+function buildRevokePreview(id, payload) {
+  const { data, found } = findPlayedMatch(id);
+  const { targetStatus, candidate } = buildRevokeCandidate(found, data, payload);
+
+  const beforeTable = tableFromData(data);
+  const afterData = {
+    ...data,
+    matches: data.matches.map((item) => (item.id === found.id ? candidate : item)),
+  };
+  const afterTable = tableFromData(afterData);
+  const beforeMap = new Map(beforeTable.map((row) => [row.teamId, row]));
+  const afterMap = new Map(afterTable.map((row) => [row.teamId, row]));
+
+  const oldHome = data.teams.find((team) => team.id === found.homeTeamId);
+  const oldAway = data.teams.find((team) => team.id === found.awayTeamId);
+  const newHome = data.teams.find((team) => team.id === candidate.homeTeamId);
+  const newAway = data.teams.find((team) => team.id === candidate.awayTeamId);
+  // 同时改了对阵时，积分被收回的是原对阵两队，新对阵两队也一并标出
+  const involvedIds = Array.from(new Set([found.homeTeamId, found.awayTeamId, candidate.homeTeamId, candidate.awayTeamId]));
+
+  // 其他球队也可能因为这一场退出累计而被名次带动，一并列出来
+  const involved = new Set(involvedIds);
+  const rankChanges = afterTable
+    .map((row) => ({ ...teamBrief(row), rankBefore: beforeMap.get(row.teamId).rank, rankAfter: row.rank }))
+    .filter((item) => !involved.has(item.teamId) && item.rankBefore !== item.rankAfter)
+    .sort((a, b) => a.rankAfter - b.rankAfter || a.rankBefore - b.rankBefore);
+
+  const { teams: teamMap, venues } = nameMaps();
+  const matchupChanged = found.homeTeamId !== candidate.homeTeamId || found.awayTeamId !== candidate.awayTeamId;
+
+  return {
+    match: decorate(candidate, teamMap, venues),
+    playedMatch: decorate(found, teamMap, venues),
+    matchupChanged,
+    targetStatus,
+    involvedTeamIds: involvedIds,
+    revokedScore: {
+      homeGoals: found.homeGoals,
+      awayGoals: found.awayGoals,
+      text: `${found.homeGoals} : ${found.awayGoals}`,
+      homeTeam: teamBrief(oldHome),
+      awayTeam: teamBrief(oldAway),
+    },
+    teams: involvedIds.map((teamId) => diffRow(beforeMap, afterMap, teamId)),
+    homeTeam: teamBrief(newHome),
+    awayTeam: teamBrief(newAway),
+    rankChanges,
+    reRegisterRequired: true,
+  };
+}
+
+// 真正收回：按整张表单落盘、清掉比分、盖上收回时间戳；原比分不会保留
+function revokeMatch(id, payload) {
+  const preview = buildRevokePreview(id, payload);
+  const { data, found } = findPlayedMatch(id);
+  const { candidate } = buildRevokeCandidate(found, data, payload);
+  Object.assign(found, candidate);
+  found.resultRevokedAt = new Date().toISOString();
+  found.updatedAt = found.resultRevokedAt;
+  save(data);
+  const { teams, venues } = nameMaps();
+  return { ...preview, match: decorate(found, teams, venues) };
+}
+
 function deleteMatch(id) {
   const data = load();
   const index = data.matches.findIndex((item) => item.id === id);
@@ -236,4 +369,4 @@ function deleteMatch(id) {
   return { id: removed.id, round: removed.round };
 }
 
-module.exports = { listMatches, createMatch, updateMatch, recordResult, deleteMatch, resolveVenueId };
+module.exports = { listMatches, createMatch, updateMatch, recordResult, previewRevoke, revokeMatch, deleteMatch, resolveVenueId };

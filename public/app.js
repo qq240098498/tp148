@@ -9,6 +9,8 @@ const state = {
   standings: null,
   summary: null,
   drawer: { mode: '', entity: '', id: '', title: '' },
+  revoke: null,
+  revokePending: false,
   teamFilter: { status: '', keyword: '' },
   venueFilter: { keyword: '' },
   matchFilter: { round: '', status: '', keyword: '' },
@@ -16,6 +18,7 @@ const state = {
 };
 
 const OPERATOR_KEY = 'league-board-operator';
+let revokeSeq = 0;
 const WEEKDAYS = [['0', '周日'], ['1', '周一'], ['2', '周二'], ['3', '周三'], ['4', '周四'], ['5', '周五'], ['6', '周六']];
 const VIEW_META = {
   overview: { title: '概览', sub: '整季的场次进度与最近赛果', action: '' },
@@ -280,11 +283,24 @@ function openVenueDrawer(venue) {
 }
 
 function openMatchDrawer(match) {
-  state.drawer = { mode: match ? 'edit' : 'create', entity: 'match', id: match ? match.id : '', title: match ? `编辑赛程：第 ${match.round} 轮` : '新增赛程' };
+  state.drawer = {
+    mode: match ? 'edit' : 'create',
+    entity: 'match',
+    id: match ? match.id : '',
+    title: match ? `编辑赛程：第 ${match.round} 轮` : '新增赛程',
+    match: match || null,
+  };
+  state.revoke = null;
+  state.revokePending = false;
+  revokeSeq += 1;
   const teamOptions = state.teams.map((item) => ({ value: item.id, label: `${item.name}（${item.shortName}）` }));
   const venueOptions = [{ value: '', label: '留空表示用主队主场' }].concat(state.venues.map((item) => ({ value: item.id, label: item.name })));
   const statusOptions = ['待赛', '已赛', '延期', '取消'].map((value) => ({ value, label: value }));
+  const revokedBanner = match && match.resultRevokedAt && match.status !== '已赛'
+    ? '<div class="revoke-banner">这场的赛果此前已被收回，原来的比分不会恢复。把状态改回已赛时，需要重新登记主队与客队的两个进球数。</div>'
+    : '';
   el('drawer-form').innerHTML = `
+    ${revokedBanner}
     <div class="field-row">
       <label class="field"><span>轮次</span><input data-name="round" maxlength="2" value="${escapeHtml(match ? match.round : '1')}" placeholder="1"></label>
       <label class="field"><span>日期</span><input data-name="date" maxlength="10" value="${escapeHtml(match ? match.date : '')}" placeholder="2026-03-14"></label>
@@ -297,15 +313,152 @@ function openMatchDrawer(match) {
     <label class="field"><span>场地</span><select data-name="venueId">${optionsHtml(venueOptions, match ? match.venueId : '')}</select></label>
     <div class="field-row">
       <label class="field"><span>状态</span><select data-name="status">${optionsHtml(statusOptions, match ? match.status : '待赛')}</select></label>
-      <label class="field"><span>主队进球</span><input data-name="homeGoals" maxlength="2" value="${match && match.homeGoals !== null ? match.homeGoals : ''}" placeholder="留空表示未赛"></label>
-      <label class="field"><span>客队进球</span><input data-name="awayGoals" maxlength="2" value="${match && match.awayGoals !== null ? match.awayGoals : ''}" placeholder="留空表示未赛"></label>
+      <label class="field"><span>主队进球</span><input data-name="homeGoals" maxlength="2" value="${match && match.homeGoals !== null && match.homeGoals !== undefined ? match.homeGoals : ''}" placeholder="留空表示未赛"></label>
+      <label class="field"><span>客队进球</span><input data-name="awayGoals" maxlength="2" value="${match && match.awayGoals !== null && match.awayGoals !== undefined ? match.awayGoals : ''}" placeholder="留空表示未赛"></label>
     </div>
-    <label class="field"><span>备注</span><input data-name="note" maxlength="200" value="${escapeHtml(match ? match.note : '')}" placeholder="需要留意的地方"></label>`;
+    <label class="field"><span>备注</span><input data-name="note" maxlength="200" value="${escapeHtml(match ? match.note : '')}" placeholder="需要留意的地方"></label>
+    <div class="revoke-panel" id="revoke-panel" hidden></div>`;
+  el('drawer-form').querySelector('[data-name="status"]').addEventListener('change', onMatchStatusChange);
   showDrawer();
+}
+
+function deltaText(metric) {
+  const sign = metric.delta > 0 ? '+' : '';
+  return `${metric.before} → ${metric.after}（${sign}${metric.delta}）`;
+}
+
+function rankText(before, after) {
+  if (before === after) return `第 ${before} 名不变`;
+  const move = after < before ? '上升' : '下降';
+  return `第 ${before} 名 → 第 ${after} 名（${move} ${Math.abs(after - before)} 位）`;
+}
+
+// 已赛改回未赛：先把后果摆出来，确认之前一个字都不落盘
+async function onMatchStatusChange(event) {
+  const targetStatus = event.target.value;
+  const original = state.drawer.match;
+  if (!original || original.status !== '已赛' || targetStatus === '已赛') {
+    hideRevokePanel();
+    return;
+  }
+  const panel = el('revoke-panel');
+  panel.hidden = false;
+  panel.innerHTML = '<p class="hint">正在核算收回后的积分与名次……</p>';
+  el('drawer-form').classList.add('is-locked');
+  el('drawer-submit').disabled = true;
+  state.revokePending = true;
+  const seq = ++revokeSeq;
+  // 预览同样按整张表单模拟：改了对阵或日期时，说明里的球队与冲突校验都以表单现状为准
+  const { payload: formPayload } = collectForm();
+  try {
+    const preview = await request(`/api/matches/${encodeURIComponent(state.drawer.id)}/revoke-preview`, {
+      method: 'POST',
+      body: JSON.stringify({ ...formPayload, round: Number(formPayload.round), status: targetStatus }),
+    });
+    if (seq !== revokeSeq) return;
+    state.revokePending = false;
+    state.revoke = preview;
+    renderRevokePanel(preview);
+  } catch (err) {
+    if (seq !== revokeSeq) return;
+    state.revokePending = false;
+    panel.innerHTML = '';
+    panel.hidden = true;
+    el('drawer-form').classList.remove('is-locked');
+    el('drawer-submit').disabled = false;
+    event.target.value = '已赛';
+    toast(err.message, 'bad');
+    markField(err.field);
+  }
+}
+
+function renderRevokePanel(preview) {
+  const { match, playedMatch, revokedScore, teams, rankChanges } = preview;
+  const involvedIds = new Set(preview.involvedTeamIds);
+  const others = rankChanges.filter((item) => !involvedIds.has(item.teamId));
+  const oldIds = new Set([playedMatch.homeTeamId, playedMatch.awayTeamId]);
+  const teamTag = (team) => {
+    const wasOld = oldIds.has(team.teamId);
+    const isNew = team.teamId === match.homeTeamId || team.teamId === match.awayTeamId;
+    if (wasOld && isNew) return '';
+    if (wasOld) return '<em class="tag-old">原对阵</em>';
+    return '<em class="tag-new">改后对阵</em>';
+  };
+  const teamLine = (team) => `<li>
+      <strong>${escapeHtml(team.name)}${teamTag(team)}</strong>
+      <span>积分 ${deltaText(team.points)}</span>
+      <span>净胜球 ${deltaText(team.goalDiff)}（进球 ${team.goalsFor.before}→${team.goalsFor.after}，失球 ${team.goalsAgainst.before}→${team.goalsAgainst.after}）</span>
+      <span>${rankText(team.rank.before, team.rank.after)}</span>
+    </li>`;
+  const changeLine = preview.matchupChanged
+    ? `<p class="revoke-score">保存后对阵改为：${escapeHtml(match.homeName)} vs ${escapeHtml(match.awayName)}</p>`
+    : '';
+  el('revoke-panel').innerHTML = `
+    <div class="revoke-head">确认收回这场比赛的结果？</div>
+    <p class="revoke-score">第 ${playedMatch.round} 轮　${escapeHtml(playedMatch.homeName)} <b>${revokedScore.homeGoals} : ${revokedScore.awayGoals}</b> ${escapeHtml(playedMatch.awayName)} 将改回「${escapeHtml(preview.targetStatus)}」</p>
+    ${changeLine}
+    <ul class="revoke-impact">${teams.map(teamLine).join('')}</ul>
+    ${others.length ? `<p class="revoke-others">另有 ${others.length} 支球队名次随之变化：${others.map((item) => `${escapeHtml(item.name)} ${item.rankBefore}→${item.rankAfter}`).join('、')}</p>` : ''}
+    <p class="revoke-warn">确认后比分 <b>${revokedScore.homeGoals}</b> 与 <b>${revokedScore.awayGoals}</b> 会被收回并清空，积分榜立即重算；以后再改回已赛，原比分不会自己回来，需要重新登记。</p>
+    <div class="revoke-actions">
+      <button type="button" class="danger" id="revoke-confirm">确认收回并保存</button>
+      <button type="button" class="ghost" id="revoke-cancel">返回修改</button>
+    </div>`;
+  el('revoke-confirm').addEventListener('click', confirmRevoke);
+  el('revoke-cancel').addEventListener('click', cancelRevoke);
+  el('drawer-submit').disabled = true;
+}
+
+function hideRevokePanel() {
+  state.revoke = null;
+  state.revokePending = false;
+  revokeSeq += 1;
+  el('drawer-form').classList.remove('is-locked');
+  el('drawer-submit').disabled = false;
+  const panel = el('revoke-panel');
+  if (panel) {
+    panel.innerHTML = '';
+    panel.hidden = true;
+  }
+}
+
+// 取消：状态下拉还原成已赛，表单与数据都不变
+function cancelRevoke() {
+  const statusNode = el('drawer-form').querySelector('[data-name="status"]');
+  if (statusNode) statusNode.value = '已赛';
+  hideRevokePanel();
+}
+
+// 确认：调收回接口落盘，成功提示里写明被收回的两个比分数字
+async function confirmRevoke() {
+  const preview = state.revoke;
+  if (!preview) return;
+  const button = el('revoke-confirm');
+  button.disabled = true;
+  // 表单里若同时改了日期、对阵、备注等，随收回一起保存；比分两个数字由收回流程定死为空
+  const { payload } = collectForm();
+  const body = { ...payload, round: Number(payload.round), status: preview.targetStatus, homeGoals: null, awayGoals: null };
+  try {
+    const result = await request(`/api/matches/${encodeURIComponent(state.drawer.id)}/revoke`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    toast(`已收回比分 ${result.revokedScore.homeGoals} : ${result.revokedScore.awayGoals}，积分榜已重算；再改回已赛需重新登记比分`, 'ok');
+    await Promise.all([loadMatches(), loadSummary()]);
+    if (state.view === 'table') await loadStandings();
+    closeDrawer();
+  } catch (err) {
+    button.disabled = false;
+    toast(err.message, 'bad');
+    markField(err.field);
+  }
 }
 
 function openResultDrawer(match) {
   state.drawer = { mode: 'result', entity: 'match', id: match.id, title: `登记比分：${match.homeName} vs ${match.awayName}` };
+  state.revoke = null;
+  state.revokePending = false;
+  revokeSeq += 1;
   el('drawer-form').innerHTML = `
     <div class="field-row">
       <label class="field"><span>${escapeHtml(match.homeName)} 进球</span><input data-name="homeGoals" maxlength="2" value="" placeholder="0"></label>
@@ -326,8 +479,12 @@ function showDrawer() {
 function closeDrawer() {
   el('drawer').classList.remove('show');
   el('backdrop').classList.remove('show');
+  el('drawer-form').classList.remove('is-locked');
   el('drawer-form').innerHTML = '';
   state.drawer = { mode: '', entity: '', id: '', title: '' };
+  state.revoke = null;
+  state.revokePending = false;
+  revokeSeq += 1;
 }
 
 function collectForm() {
@@ -351,6 +508,11 @@ async function submitDrawer() {
   el('drawer-form').querySelectorAll('.invalid').forEach((node) => node.classList.remove('invalid'));
   const { payload, days } = collectForm();
   const { mode, entity, id } = state.drawer;
+  // 已赛改回未赛的后果还没确认：主保存按钮不生效，要在收回面板里确认或返回
+  if (entity === 'match' && mode === 'edit' && (state.revoke || state.revokePending)) {
+    toast('请先在下方说明里确认收回，或点「返回修改」', 'bad');
+    return;
+  }
   try {
     if (entity === 'team') {
       const body = { ...payload, seedRank: Number(payload.seedRank) };
